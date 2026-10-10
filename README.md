@@ -36,3 +36,4 @@ Invoke-Pester .\tests\
 ## 📜 License
 Distributed under the MIT License. See `LICENSE` for more information.
 
+
