@@ -40,22 +40,22 @@ function App() {
               View Source on GitHub
             </a>
           </div>
-
-          <div className="terminal-window">
-            <div className="terminal-header">
-              <div className="term-dot r"></div>
-              <div className="term-dot y"></div>
-              <div className="term-dot g"></div>
-            </div>
-            <div className="terminal-body">
-              {terminalText}
-            </div>
-          </div>
         </div>
       </main>
 
       <section className="features container">
         <h2 className="section-title">Why OS-GameBooster?</h2>
+
+        <div className="terminal-window" style={{ marginBottom: '4rem' }}>
+          <div className="terminal-header">
+            <div className="term-dot r"></div>
+            <div className="term-dot y"></div>
+            <div className="term-dot g"></div>
+          </div>
+          <div className="terminal-body">
+            {terminalText}
+          </div>
+        </div>
         <div className="feature-grid">
           <div className="feature-card">
             <div className="feature-icon">⚡</div>
