@@ -1,0 +1,26 @@
+name: PowerShell CI
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+jobs:
+  analyze-and-test:
+    name: Run PSScriptAnalyzer and Pester
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run PSScriptAnalyzer
+      shell: pwsh
+      run: |
+        Invoke-ScriptAnalyzer -Path .\GameBooster.ps1 -Recurse -Severity Error,Warning
+        
+    - name: Run Pester Tests
+      shell: pwsh
+      run: |
+        Install-Module -Name Pester -Force -SkipPublisherCheck
+        Invoke-Pester -Path .\tests\ -PassThru
