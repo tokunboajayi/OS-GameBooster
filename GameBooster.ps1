@@ -20,6 +20,8 @@
 #  [NEW] -RestoreOnly switch (used by StopBooster.bat)
 #  [NEW] GPU preference + FSO also applied to the running game's real exe path
 #        (from GameBooster; covers installs outside Program Files)
+#  [FIX] QuickEdit turned off for the booster's window: clicking it no longer
+#        freezes the script in "Select" mode
 #
 #  v8.0 EXTREME MAXIMIZED CHANGELOG:
 #  [NEW] Fullscreen Optimizations disabled for Game
@@ -105,6 +107,16 @@ public static class WinApi {
 
     [DllImport("powrprof.dll")]
     public static extern uint PowerSetActiveOverlayScheme(Guid OverlayGuid);
+
+    // Console input mode (QuickEdit: a click starts a selection that pauses the script)
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 
     public static bool PurgeStandbyList() {
         int command = 4;
@@ -260,6 +272,23 @@ function Update-Dashboard {
 
     Write-Host "  -----------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  >>> Press [Ctrl+C] to abort operation..." -ForegroundColor DarkGray
+}
+
+function Disable-QuickEdit {
+    <#
+    .SYNOPSIS
+        Turns off QuickEdit for this console so a stray click can't freeze the
+        dashboard (and the boost/restore loop) in "Select" mode.
+        Returns the original mode so it can be put back on exit.
+    #>
+    try {
+        $hIn = [WinApi]::GetStdHandle(-10)  # STD_INPUT_HANDLE
+        [uint32]$mode = 0
+        if (-not [WinApi]::GetConsoleMode($hIn, [ref]$mode)) { return $null }
+        # Clear ENABLE_QUICK_EDIT_MODE (0x40); ENABLE_EXTENDED_FLAGS (0x80) is required for it to stick
+        [WinApi]::SetConsoleMode($hIn, ($mode -band (-bnot [uint32]0x40)) -bor 0x80) | Out-Null
+        return $mode
+    } catch { return $null }
 }
 
 function Reset-Log {
@@ -862,6 +891,8 @@ if (Test-Path $StateFile) {
 }
 if ($RestoreOnly) { exit }
 
+$originalConsoleMode = Disable-QuickEdit
+
 $State            = New-BoostState
 $wasRunning       = $false
 $boostCount       = 0
@@ -994,6 +1025,8 @@ while ($true) {
     }
 }
 } finally {
+    # Give the -NoExit prompt its normal click-to-select back
+    if ($null -ne $originalConsoleMode) { try { [WinApi]::SetConsoleMode([WinApi]::GetStdHandle(-10), $originalConsoleMode) | Out-Null } catch {} }
     if ($wasRunning) {
         Restore-BoostState $State
     }
