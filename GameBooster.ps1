@@ -1,7 +1,25 @@
 # ============================================================================
-#  GameBooster.ps1 v8.0 -- EXTREME MAXIMIZED
+#  GameBooster.ps1 v8.1 -- EXTREME MAXIMIZED
 #  Tuned for: Intel Core Ultra 7 258V + Intel Arc 140V 16GB (Lunar Lake)
 #  Windows 11 25H2 (Build 26200) | Wi-Fi 7 BE201
+#
+#  v8.1 SAFE RESTORE CHANGELOG:
+#  [CRITICAL FIX] Restore no longer writes hardcoded power values onto your plan
+#                 (it was turning CPU turbo boost OFF on Balanced after every game)
+#  [CRITICAL FIX] Ultimate Performance plan can't exist on Modern Standby laptops;
+#                 now uses the Windows "Best performance" power mode instead
+#  [FIX] Every registry tweak snapshots the original value and restores exactly that
+#        (mouse acceleration, transparency etc. were reset to hardcoded defaults)
+#  [FIX] Restore state saved to BoosterRestore.json: closing the window mid-game
+#        no longer leaves tweaks applied; next start or StopBooster.bat restores them
+#  [FIX] Defender exclusion is removed again when Game closes
+#  [FIX] Kill list no longer force-closes browsers, editors, terminals, Java or
+#        recorders (unsaved work / recordings were lost)
+#  [DEL] bcdedit tweaks (need a reboot, so toggling them per game did nothing)
+#  [DEL] USB selective suspend tweak and unused network/DNS functions
+#  [NEW] -RestoreOnly switch (used by StopBooster.bat)
+#  [NEW] GPU preference + FSO also applied to the running game's real exe path
+#        (from GameBooster; covers installs outside Program Files)
 #
 #  v8.0 EXTREME MAXIMIZED CHANGELOG:
 #  [NEW] Fullscreen Optimizations disabled for Game
@@ -29,20 +47,33 @@
 # ============================================================================
 
 param(
-    [string[]]$ProcessNames = @("GameClient-Win64-Shipping", "cs2", "r5apex", "Valorant-Win64-Shipping", "hl2", "dota2"),
+    [string[]]$ProcessNames = @("FortniteClient-Win64-Shipping", "cs2", "r5apex", "Valorant-Win64-Shipping", "hl2", "dota2"),
     [string]$GameName = "ANY_GAME",
-    [switch]$Silent
+    [switch]$Silent,  # Suppresses console output when launched by .bat
+    [switch]$Elevate, # Explicitly request UAC elevation
+    [switch]$RestoreOnly  # Undo any leftover tweaks from BoosterRestore.json, then exit
 )
 
 # -- Auto-Elevation Check -----------------------------------------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    if (-not $Silent) { Write-Host "Requesting Administrator privileges..." }
-    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    if ($Silent) { $argList += " -Silent" }
-    # Automatically elevate to Admin
-    Start-Process powershell.exe -ArgumentList $argList -Verb RunAs
-    exit
+    if ($Elevate) {
+        try {
+            $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+            if ($Silent) { $argList += " -Silent" }
+            if ($RestoreOnly) { $argList += " -RestoreOnly" }
+            Start-Process powershell.exe -ArgumentList $argList -Verb RunAs
+            exit
+        } catch {
+            Write-Host "UAC elevation request failed or was cancelled." -ForegroundColor Yellow
+        }
+    }
+    if (-not $Silent) {
+        Write-Host "Notice: Running in Standard Mode (User Privileges)." -ForegroundColor Yellow
+        Write-Host "Active: Memory cleaner, bloatware manager, and live telemetry dashboard." -ForegroundColor Cyan
+        Write-Host "Tip: Run as Administrator for extreme kernel/BCDEDIT/MPO tweaks." -ForegroundColor DarkGray
+        Start-Sleep -Seconds 1
+    }
 }
 
 # -- Native API Imports -------------------------------------------------------
@@ -68,6 +99,13 @@ public static class WinApi {
     [DllImport("kernel32.dll")]
     public static extern bool SetProcessWorkingSetSizeEx(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize, int Flags);
 
+    // Windows 11 power mode slider (Best power efficiency / Balanced / Best performance)
+    [DllImport("powrprof.dll")]
+    public static extern uint PowerGetActualOverlayScheme(out Guid OverlayGuid);
+
+    [DllImport("powrprof.dll")]
+    public static extern uint PowerSetActiveOverlayScheme(Guid OverlayGuid);
+
     public static bool PurgeStandbyList() {
         int command = 4;
         int result = NtSetSystemInformation(80, ref command, sizeof(int));
@@ -81,12 +119,14 @@ public static class WinApi {
 
 # Uses the passed $ProcessNames parameter
 if ($ProcessNames.Count -eq 0) {
-    $ProcessNames = @("GameClient-Win64-Shipping", "cs2", "r5apex", "Valorant-Win64-Shipping")
+    $ProcessNames = @("FortniteClient-Win64-Shipping", "cs2", "r5apex", "Valorant-Win64-Shipping")
 }
 
 $KillList = @(
     # Microsoft bloat
-    "OneDrive", "msedge", "msedgewebview2", "Teams", "ms-teams", "SearchHost",
+    # Never list apps that can hold unsaved work (browsers, editors, terminals, recorders):
+    # Stop-Process -Force gives them no chance to save.
+    "OneDrive", "msedgewebview2", "Teams", "ms-teams", "SearchHost",
     "StartMenuExperienceHost", "Widgets", "WidgetService", "PhoneExperienceHost",
     "YourPhoneServer", "TextInputHost", "GameBarPresenceWriter", "GameBar",
     "SnippingTool", "CalculatorApp", "CrossDeviceService", "FileCoAuth", "OfficeClickToRun",
@@ -98,20 +138,16 @@ $KillList = @(
     "DSAService", "DSATray", "BioIso", "esrv", "ipf_helper", "ImController*",
     "LenovoNow*", "LenovoAccessibilityService", "AIMeetingManager",
     # Apps that eat resources
-    "Spotify", "EpicWebHelper", "ollama app", "ollama", "WorkloadsSessionHost",
-    "mc-fw-host", "chrome", "node", "PresentMonService", "WindowsTerminal",
-    "notepad", "mspaint", "Code", "firefox", "brave", "opera",
-    # Recording / streaming overhead
-    "OBS64", "obs64", "Streamlabs*", "Medal*", "Overwolf*",
-    "RadeonSoftware", "AMDRSServ", "ShareX", "Lightshot",
+    "EpicWebHelper", "ollama app", "ollama", "WorkloadsSessionHost",
+    "mc-fw-host", "PresentMonService",
+    # Overlay / screenshot overhead
+    "Overwolf*", "RadeonSoftware", "AMDRSServ", "ShareX", "Lightshot",
     # Background updaters & telemetry
     "SteamService", "steamwebhelper", "NahimicSvc*", "NahimicOSD",
-    "CCleanerBrowser*", "UpdateAssistant", "SecurityHealthService",
+    "CCleanerBrowser*", "UpdateAssistant",
     # 2026 H2 Windows additions
     "Recall*", "WindowsCopilotRuntime", "CopilotService",
-    "MicrosoftEdge_X*", "msedge_proxy", "PhoneLink",
-    # Java/runtime background
-    "javaw", "java", "RuntimeBroker"
+    "MicrosoftEdge_X*", "msedge_proxy", "PhoneLink"
 )
 
 # Apps banished to E-Cores (Cores 4-7) instead of killed
@@ -162,6 +198,8 @@ $RespawnScanInterval = 60   # Re-scan and kill respawned bloatware every 60s
 $VRAMCacheCleanThresholdDays = 30  # Clean shader cache if older than this
 
 $LogFile = Join-Path $PSScriptRoot "GameBooster.log"
+$StateFile = Join-Path $PSScriptRoot "BoosterRestore.json"
+$BestPerformanceMode = [guid]"ded574b5-45a0-4f42-8737-46345c09c238"
 
 # Game config paths
 $TargetLocalAppData = "$env:LOCALAPPDATA\GameGame\Saved\Config\WindowsClient"
@@ -235,6 +273,87 @@ function Reset-Log {
     }
 }
 
+# -- Restore State ------------------------------------------------------------
+# Everything a boost changes is recorded here and saved to BoosterRestore.json,
+# so the exact original settings come back even if this window is killed mid-game.
+
+function New-BoostState {
+    return [pscustomobject]@{
+        Registry = @(); Services = @(); Tasks = @()
+        PowerMode = $null; MemCompression = $false; DefenderPath = $null
+    }
+}
+
+function Save-BoostState {
+    try { $script:State | ConvertTo-Json -Depth 5 | Set-Content $StateFile -Encoding UTF8 } catch {}
+}
+
+function Set-Reg {
+    <#
+    .SYNOPSIS
+        Writes a registry value, recording the original the first time so
+        Restore-BoostState can put back exactly what was there.
+    #>
+    param([string]$Path, [string]$Name, $Value, [string]$Type = "DWord")
+    try {
+        if (-not (Test-Path $Path)) { New-Item $Path -Force -ErrorAction Stop | Out-Null }
+        $key = Get-Item $Path
+        $existed = $key.GetValueNames() -contains $Name
+        $original = [pscustomobject]@{
+            Path = $Path; Name = $Name; Existed = $existed
+            Value = if ($existed) { $key.GetValue($Name, $null, 'DoNotExpandEnvironmentNames') } else { $null }
+            Kind  = if ($existed) { $key.GetValueKind($Name).ToString() } else { $null }
+        }
+        if ($existed) { Set-ItemProperty $Path $Name $Value -ErrorAction Stop }
+        else { New-ItemProperty $Path $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null }
+        # Record only successful writes, and only the first one (later writes would record our own value)
+        if (-not ($script:State.Registry | Where-Object { $_.Path -eq $Path -and $_.Name -eq $Name })) {
+            $script:State.Registry += $original
+            Save-BoostState
+        }
+    } catch {}
+}
+
+function Restore-BoostState {
+    param($S)
+    if (-not $S) { return }
+    $failed = 0
+    Restore-TimerResolution
+    foreach ($svc in @($S.Services) | Where-Object { $_ }) {
+        try { Start-Service $svc -ErrorAction Stop } catch { $failed++ }
+    }
+    foreach ($t in @($S.Tasks) | Where-Object { $_ }) {
+        try { Enable-ScheduledTask -TaskName $t.Name -TaskPath $t.Path -ErrorAction Stop | Out-Null } catch { $failed++ }
+    }
+    foreach ($r in @($S.Registry) | Where-Object { $_ }) {
+        try {
+            if ($r.Existed) {
+                $v = if ($r.Kind -eq "Binary") { [byte[]]$r.Value } else { $r.Value }
+                New-ItemProperty $r.Path $r.Name -Value $v -PropertyType $r.Kind -Force -ErrorAction Stop | Out-Null
+            } elseif (Get-ItemProperty $r.Path $r.Name -ErrorAction SilentlyContinue) {
+                Remove-ItemProperty $r.Path $r.Name -ErrorAction Stop
+            }
+        } catch { $failed++ }
+    }
+    if ($S.MemCompression) {
+        try { Enable-MMAgent -MemoryCompression -ErrorAction Stop } catch { $failed++ }
+    }
+    if ($S.PowerMode) {
+        try { [WinApi]::PowerSetActiveOverlayScheme([guid]$S.PowerMode) | Out-Null } catch { $failed++ }
+    }
+    if ($S.DefenderPath) {
+        try { Remove-MpPreference -ExclusionPath $S.DefenderPath -ErrorAction Stop } catch { $failed++ }
+    }
+
+    if ($failed -eq 0) {
+        Remove-Item $StateFile -ErrorAction SilentlyContinue
+        Write-Log "    System restored to original settings"
+    } else {
+        # Keep the file so StopBooster.bat (admin) can finish the job
+        Write-Log "    $failed settings could not be restored (need admin?) -- run StopBooster.bat"
+    }
+}
+
 # -- Game Process Detection -----------------------------------------------
 
 function Get-TargetProcess {
@@ -243,7 +362,7 @@ function Get-TargetProcess {
         Finds the running Game game process across all known executable names.
         Returns the first match or $null.
     #>
-    foreach ($name in $TargetProcessNames) {
+    foreach ($name in $ProcessNames) {
         $proc = Get-Process -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($proc) { return $proc }
     }
@@ -299,7 +418,7 @@ function Compress-WorkingSets {
         "SecurityHealthSystray", "MsMpEng"  # Don't fight Windows Defender
     )
     Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.Name -notin $protected -and $_.WorkingSet64 -gt 50MB
+        $_.Name -notin $protected -and $_.Name -notin $ProcessNames -and $_.WorkingSet64 -gt 50MB
     } | ForEach-Object {
         try { [WinApi]::EmptyWorkingSet($_.Handle) | Out-Null } catch {}
     }
@@ -368,7 +487,11 @@ function Set-GPUHighPerformanceForTarget {
     try {
         $gpuPrefKey = "HKCU:\SOFTWARE\Microsoft\DirectX\UserGpuPreferences"
         if (-not (Test-Path $gpuPrefKey)) { New-Item $gpuPrefKey -Force | Out-Null }
-        $fnExes = (Get-TargetProcess).Path
+        # Default install path plus wherever the running game actually lives (other drives/libraries)
+        $fnExes = @(
+            "$env:ProgramFiles\Epic Games\Game\GameGame\Binaries\Win64\GameClient-Win64-Shipping.exe"
+            (Get-TargetProcess).Path
+        ) | Where-Object { $_ } | Select-Object -Unique
         foreach ($exe in $fnExes) {
             if (Test-Path $exe) {
                 Set-ItemProperty $gpuPrefKey $exe "GpuPreference=2;" -ErrorAction SilentlyContinue
@@ -388,17 +511,10 @@ function Disable-MemoryCompression {
     try {
         $current = Get-MMAgent -ErrorAction SilentlyContinue
         if ($current.MemoryCompression) {
-            Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
+            Disable-MMAgent -MemoryCompression -ErrorAction Stop
+            $script:State.MemCompression = $true
             Write-Log "    Windows Memory Compression DISABLED (frees CPU for game)"
-            return $true
         }
-    } catch {}
-    return $false
-}
-
-function Restore-MemoryCompression {
-    try {
-        Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
     } catch {}
 }
 
@@ -412,28 +528,6 @@ function Set-BoosterIdlePriority {
         $self = Get-Process -Id $PID
         $self.PriorityClass = 'Idle'
         $self.ProcessorAffinity = 0xF0  # E-Cores only
-    } catch {}
-}
-
-function Disable-NetworkAdapterPowerMgmt {
-    <#
-    .SYNOPSIS
-        v7.0 NEW: Disables power management on ALL network adapters.
-        Prevents Wi-Fi from micro-sleeping between packets which causes
-        ping spikes and packet loss during gameplay.
-    #>
-    try {
-        Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object {
-            # Disable power management via registry
-            $adapterKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}"
-            Get-ChildItem $adapterKey -ErrorAction SilentlyContinue | ForEach-Object {
-                $driverDesc = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DriverDesc
-                if ($driverDesc) {
-                    Set-ItemProperty $_.PSPath "PnPCapabilities" 0x18 -ErrorAction SilentlyContinue  # Disable idle power mgmt
-                }
-            }
-        }
-        Write-Log "    Network adapter power management DISABLED"
     } catch {}
 }
 
@@ -474,68 +568,24 @@ function Set-TargetExtremeAffinity {
     if ($banishedCount -gt 0) { Write-Log "    Banished $banishedCount background procs to E-CORES (0xF0)" }
 }
 
-function Enable-UltimatePerformance {
+function Enable-BestPerformanceMode {
     <#
     .SYNOPSIS
-        Activates 'Ultimate Performance' power plan with aggressive sub-settings
-        tuned for Lunar Lake's power delivery.
+        Switches the Windows 11 power mode slider to "Best performance".
+        Lunar Lake laptops use Modern Standby, where custom plans such as
+        Ultimate Performance can't be activated, so the slider is the lever.
     #>
     try {
-        $ultimateGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61"
-        $current = powercfg /getactivescheme 2>&1
-        $originalPowerPlan = $null
-
-        if ($current -match "([A-Fa-f0-9\-]{36})") {
-            $originalPowerPlan = $matches[1]
+        $current = [guid]::Empty
+        if ([WinApi]::PowerGetActualOverlayScheme([ref]$current) -ne 0) { return }
+        if ($current -eq $BestPerformanceMode) {
+            Write-Log "    Power mode already Best performance"
+            return
         }
-
-        $check = powercfg /list | Select-String $ultimateGuid
-        if (-not $check) {
-            powercfg -duplicatescheme $ultimateGuid | Out-Null
-            Write-Log "    Injected hidden Ultimate Performance power plan"
-        }
-
-        powercfg /setactive $ultimateGuid | Out-Null
-
-        # Disable core parking entirely
-        powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMINCORES 100 2>&1 | Out-Null
-        # Minimum processor state = 100%
-        powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN 100 2>&1 | Out-Null
-        # Energy Performance Preference = 0 (maximum performance)
-        powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFEPP 0 2>&1 | Out-Null
-        # Processor performance boost mode = aggressive
-        powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFBOOSTMODE 2 2>&1 | Out-Null
-        # Processor idle disable = disable idle
-        powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR IDLEDISABLE 1 2>&1 | Out-Null
-        # Heterogeneous policy: prefer P-cores for foreground
-        powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR SCHEDPOLICY 5 2>&1 | Out-Null
-        # Short thread scheduling: prefer P-cores
-        powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR SHORTSCHEDPOLICY 5 2>&1 | Out-Null
-
-        powercfg /setactive SCHEME_CURRENT 2>&1 | Out-Null
-
-        Write-Log "    Power Plan -> ULTIMATE PERFORMANCE (all idle disabled)"
-        return $originalPowerPlan
-    } catch {
-        Write-Log "    Failed to apply Ultimate Performance plan"
-        return $null
-    }
-}
-
-function Restore-PowerPlan {
-    param($OriginalPlanGuid)
-    try {
-        if ($OriginalPlanGuid) {
-            powercfg /setactive $OriginalPlanGuid | Out-Null
-            powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMINCORES 5 2>&1 | Out-Null
-            powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN 5 2>&1 | Out-Null
-            powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFEPP 50 2>&1 | Out-Null
-            powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFBOOSTMODE 0 2>&1 | Out-Null
-            powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR IDLEDISABLE 0 2>&1 | Out-Null
-            powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR SCHEDPOLICY 0 2>&1 | Out-Null
-            powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR SHORTSCHEDPOLICY 0 2>&1 | Out-Null
-            powercfg /setactive SCHEME_CURRENT 2>&1 | Out-Null
-            Write-Log "    Power Plan restored to original"
+        if ([WinApi]::PowerSetActiveOverlayScheme($BestPerformanceMode) -eq 0) {
+            $script:State.PowerMode = $current.ToString()
+            Save-BoostState
+            Write-Log "    Power mode -> Best performance"
         }
     } catch {}
 }
@@ -543,75 +593,48 @@ function Restore-PowerPlan {
 # -- Input / OS Overrides ----------------------------------------------------
 
 function Reduce-InputLag {
-    try {
-        # Raw mouse input (1:1 movement, no acceleration)
-        Set-ItemProperty "HKCU:\Control Panel\Mouse" "MouseSpeed" "0"
-        Set-ItemProperty "HKCU:\Control Panel\Mouse" "MouseThreshold1" "0"
-        Set-ItemProperty "HKCU:\Control Panel\Mouse" "MouseThreshold2" "0"
-        Set-ItemProperty "HKCU:\Control Panel\Mouse" "SmoothMouseXCurve" ([byte[]](0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xC0,0xCC,0x0C,0x00,0x00,0x00,0x00,0x00,0x80,0x99,0x19,0x00,0x00,0x00,0x00,0x00,0x40,0x66,0x26,0x00,0x00,0x00,0x00,0x00,0x00,0x33,0x33,0x00,0x00,0x00,0x00,0x00))
-        Set-ItemProperty "HKCU:\Control Panel\Mouse" "SmoothMouseYCurve" ([byte[]](0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x38,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xA8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xE0,0x00,0x00,0x00,0x00,0x00))
+    # Raw mouse input (1:1 movement, no acceleration)
+    $mouse = "HKCU:\Control Panel\Mouse"
+    Set-Reg $mouse "MouseSpeed" "0" String
+    Set-Reg $mouse "MouseThreshold1" "0" String
+    Set-Reg $mouse "MouseThreshold2" "0" String
+    Set-Reg $mouse "SmoothMouseXCurve" ([byte[]](0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xC0,0xCC,0x0C,0x00,0x00,0x00,0x00,0x00,0x80,0x99,0x19,0x00,0x00,0x00,0x00,0x00,0x40,0x66,0x26,0x00,0x00,0x00,0x00,0x00,0x00,0x33,0x33,0x00,0x00,0x00,0x00,0x00)) Binary
+    Set-Reg $mouse "SmoothMouseYCurve" ([byte[]](0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x38,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xA8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xE0,0x00,0x00,0x00,0x00,0x00)) Binary
 
-        # MMCSS: Maximum priority for gaming tasks
-        $mmcss = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
-        Set-ItemProperty $mmcss "SystemResponsiveness" 0 -ErrorAction SilentlyContinue
-        Set-ItemProperty $mmcss "NetworkThrottlingIndex" 0xFFFFFFFF -ErrorAction SilentlyContinue
-        $gamesKey = "$mmcss\Tasks\Games"
-        if (-not (Test-Path $gamesKey)) { New-Item $gamesKey -Force | Out-Null }
-        Set-ItemProperty $gamesKey "GPU Priority" 8 -ErrorAction SilentlyContinue
-        Set-ItemProperty $gamesKey "Priority" 6 -ErrorAction SilentlyContinue
-        Set-ItemProperty $gamesKey "Scheduling Category" "High" -ErrorAction SilentlyContinue
-        Set-ItemProperty $gamesKey "SFIO Priority" "High" -ErrorAction SilentlyContinue
+    # MMCSS: Maximum priority for gaming tasks
+    $mmcss = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
+    Set-Reg $mmcss "SystemResponsiveness" 0
+    Set-Reg $mmcss "NetworkThrottlingIndex" 0xFFFFFFFF
+    $gamesKey = "$mmcss\Tasks\Games"
+    Set-Reg $gamesKey "GPU Priority" 8
+    Set-Reg $gamesKey "Priority" 6
+    Set-Reg $gamesKey "Scheduling Category" "High" String
+    Set-Reg $gamesKey "SFIO Priority" "High" String
 
-        # Direct3D / DirectX max frame latency = 1
-        $d3dKey = "HKCU:\SOFTWARE\Microsoft\Direct3D"
-        if (-not (Test-Path $d3dKey)) { New-Item $d3dKey -Force | Out-Null }
-        New-ItemProperty $d3dKey "MaxFrameLatency" 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        $dxKey = "HKCU:\SOFTWARE\Microsoft\DirectX"
-        if (-not (Test-Path $dxKey)) { New-Item $dxKey -Force | Out-Null }
-        New-ItemProperty $dxKey "MaxFrameLatency" 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+    # Direct3D / DirectX max frame latency = 1
+    Set-Reg "HKCU:\SOFTWARE\Microsoft\Direct3D" "MaxFrameLatency" 1
+    Set-Reg "HKCU:\SOFTWARE\Microsoft\DirectX" "MaxFrameLatency" 1
 
-        # Disable FSO optimizations and Game DVR
-        New-ItemProperty "HKCU:\System\GameConfigStore" "GameDVR_FSEBehaviorMode" 2 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        New-ItemProperty "HKCU:\System\GameConfigStore" "GameDVR_HonorUserFSEBehaviorMode" 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        New-ItemProperty "HKCU:\System\GameConfigStore" "GameDVR_DXGIHonorFSEWindowsCompatible" 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        New-ItemProperty "HKCU:\System\GameConfigStore" "GameDVR_EFSEFeatureFlags" 0 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 0 -ErrorAction SilentlyContinue
-        Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\GameBar" "UseNexusForGameBarEnabled" 0 -ErrorAction SilentlyContinue
-        Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\GameBar" "AutoGameModeEnabled" 1 -ErrorAction SilentlyContinue
+    # Disable FSO optimizations and Game DVR
+    $gcs = "HKCU:\System\GameConfigStore"
+    Set-Reg $gcs "GameDVR_FSEBehaviorMode" 2
+    Set-Reg $gcs "GameDVR_HonorUserFSEBehaviorMode" 1
+    Set-Reg $gcs "GameDVR_DXGIHonorFSEWindowsCompatible" 1
+    Set-Reg $gcs "GameDVR_EFSEFeatureFlags" 0
+    Set-Reg "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 0
+    Set-Reg "HKCU:\SOFTWARE\Microsoft\GameBar" "UseNexusForGameBarEnabled" 0
+    Set-Reg "HKCU:\SOFTWARE\Microsoft\GameBar" "AutoGameModeEnabled" 1
 
-        Write-Log "    Input lag elimination + MMCSS priority applied"
-    } catch {}
-}
-
-function Restore-InputLag {
-    try {
-        Set-ItemProperty "HKCU:\Control Panel\Mouse" "MouseSpeed" "1"
-        Set-ItemProperty "HKCU:\Control Panel\Mouse" "MouseThreshold1" "6"
-        Set-ItemProperty "HKCU:\Control Panel\Mouse" "MouseThreshold2" "10"
-        Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\GameBar" "UseNexusForGameBarEnabled" 1 -ErrorAction SilentlyContinue
-        $mmcss = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
-        Set-ItemProperty $mmcss "SystemResponsiveness" 20 -ErrorAction SilentlyContinue
-        Set-ItemProperty $mmcss "NetworkThrottlingIndex" 10 -ErrorAction SilentlyContinue
-    } catch {}
+    Write-Log "    Input lag elimination + MMCSS priority applied"
 }
 
 function Optimize-VisualEffects {
-    try {
-        # Custom performance mode (disables animations but keeps font smoothing)
-        Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" "VisualFXSetting" 2 -ErrorAction SilentlyContinue
-        Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 0 -ErrorAction SilentlyContinue
-        # Disable window animations
-        Set-ItemProperty "HKCU:\Control Panel\Desktop\WindowMetrics" "MinAnimate" "0" -ErrorAction SilentlyContinue
-        Write-Log "    Visual effects minimized (transparency OFF, animations OFF)"
-    } catch {}
-}
-
-function Restore-VisualEffects {
-    try {
-        Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" "VisualFXSetting" 0 -ErrorAction SilentlyContinue
-        Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 1 -ErrorAction SilentlyContinue
-        Set-ItemProperty "HKCU:\Control Panel\Desktop\WindowMetrics" "MinAnimate" "1" -ErrorAction SilentlyContinue
-    } catch {}
+    # Custom performance mode (disables animations but keeps font smoothing)
+    Set-Reg "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" "VisualFXSetting" 2
+    Set-Reg "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 0
+    # Disable window animations
+    Set-Reg "HKCU:\Control Panel\Desktop\WindowMetrics" "MinAnimate" "0" String
+    Write-Log "    Visual effects minimized (transparency OFF, animations OFF)"
 }
 
 function Disable-FSOForTarget {
@@ -623,7 +646,7 @@ function Disable-FSOForTarget {
         )
         $appCompatKey = "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
         if (-not (Test-Path $appCompatKey)) { New-Item $appCompatKey -Force | Out-Null }
-        foreach ($exe in $fnPaths) {
+        foreach ($exe in ($fnPaths + (Get-TargetProcess).Path | Where-Object { $_ } | Select-Object -Unique)) {
             if (Test-Path $exe) {
                 Set-ItemProperty $appCompatKey $exe "~ DISABLEDXMAXIMIZEDWINDOWEDMODE" -ErrorAction SilentlyContinue
             }
@@ -633,26 +656,14 @@ function Disable-FSOForTarget {
 }
 
 function Set-DefenderExclusion {
+    # Temporary: removed again by Restore-BoostState. Skipped if you already had it.
+    $path = "$env:ProgramFiles\Epic Games\Game"
     try {
-        Add-MpPreference -ExclusionPath "$env:ProgramFiles\Epic Games\Game" -ErrorAction SilentlyContinue
-        Write-Log "    Windows Defender exclusion added for Game directory"
-    } catch {}
-}
-
-function Optimize-Bcdedit {
-    try {
-        bcdedit /set useplatformclock false 2>&1 | Out-Null
-        bcdedit /set tscsyncpolicy Enhanced 2>&1 | Out-Null
-        bcdedit /set disabledynamictick yes 2>&1 | Out-Null
-        Write-Log "    HPET disabled, dynamic ticks disabled (extreme low latency)"
-    } catch {}
-}
-
-function Restore-Bcdedit {
-    try {
-        bcdedit /deletevalue useplatformclock 2>&1 | Out-Null
-        bcdedit /deletevalue tscsyncpolicy 2>&1 | Out-Null
-        bcdedit /deletevalue disabledynamictick 2>&1 | Out-Null
+        if ((Get-MpPreference -ErrorAction Stop).ExclusionPath -contains $path) { return }
+        Add-MpPreference -ExclusionPath $path -ErrorAction Stop
+        $script:State.DefenderPath = $path
+        Save-BoostState
+        Write-Log "    Windows Defender exclusion added for Game directory (until game closes)"
     } catch {}
 }
 
@@ -664,37 +675,18 @@ function Optimize-DWM {
         Reduces Desktop Window Manager overhead. DWM runs on the GPU and competes
         with Game for render time on the Arc 140V.
     #>
-    try {
-        $dwmKey = "HKCU:\SOFTWARE\Microsoft\Windows\DWM"
-        # Disable DWM overlays and unnecessary composition effects
-        Set-ItemProperty $dwmKey "EnableAeroPeek" 0 -ErrorAction SilentlyContinue
-        Set-ItemProperty $dwmKey "AlwaysHibernateThumbnails" 0 -ErrorAction SilentlyContinue
-        # Reduce DWM frame latency
-        New-ItemProperty $dwmKey "ForceEffectMode" 0 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        Write-Log "    DWM compositor overhead reduced"
-    } catch {}
-}
-
-function Restore-DWM {
-    try {
-        $dwmKey = "HKCU:\SOFTWARE\Microsoft\Windows\DWM"
-        Set-ItemProperty $dwmKey "EnableAeroPeek" 1 -ErrorAction SilentlyContinue
-        Remove-ItemProperty $dwmKey "ForceEffectMode" -ErrorAction SilentlyContinue
-    } catch {}
+    $dwmKey = "HKCU:\SOFTWARE\Microsoft\Windows\DWM"
+    # Disable DWM overlays and unnecessary composition effects
+    Set-Reg $dwmKey "EnableAeroPeek" 0
+    Set-Reg $dwmKey "AlwaysHibernateThumbnails" 0
+    # Reduce DWM frame latency
+    Set-Reg $dwmKey "ForceEffectMode" 0
+    Write-Log "    DWM compositor overhead reduced"
 }
 
 function Disable-MPO {
-    try {
-        $dwmKey = "HKLM:\SOFTWARE\Microsoft\Windows\Dwm"
-        New-ItemProperty $dwmKey "OverlayTestMode" 5 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        Write-Log "    Multi-Plane Overlay (MPO) DISABLED (stutter reduction)"
-    } catch {}
-}
-
-function Restore-MPO {
-    try {
-        Remove-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\Dwm" "OverlayTestMode" -ErrorAction SilentlyContinue
-    } catch {}
+    Set-Reg "HKLM:\SOFTWARE\Microsoft\Windows\Dwm" "OverlayTestMode" 5
+    Write-Log "    Multi-Plane Overlay (MPO) DISABLED (stutter reduction)"
 }
 
 # -- Hardware ----------------------------------------------------------------
@@ -704,6 +696,7 @@ function Force-HAGS {
     .SYNOPSIS
         Forces Hardware-Accelerated GPU Scheduling ON. Critical for Intel Arc
         to reduce driver overhead in DX12/Vulkan titles like Game.
+        Left on permanently: it only takes effect after a reboot.
     #>
     try {
         $hagsKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
@@ -723,41 +716,23 @@ function Optimize-IntelGPU {
         - Extend TDR timeout (prevents driver reset during heavy shader compilation)
         - Enable DirectStorage for GPU decompression
     #>
-    try {
-        # Arc GPU driver settings
-        $intelKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000"
-        if (Test-Path $intelKey) {
-            New-ItemProperty $intelKey "FeatureTestControl" 0x9240 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-            New-ItemProperty $intelKey "PP_PSRDisableFeature" 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-            Write-Log "    Intel Arc 140V: DPST OFF, Panel Self-Refresh OFF"
-        }
+    # Arc GPU driver settings
+    $intelKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000"
+    if (Test-Path $intelKey) {
+        Set-Reg $intelKey "FeatureTestControl" 0x9240
+        Set-Reg $intelKey "PP_PSRDisableFeature" 1
+        Write-Log "    Intel Arc 140V: DPST OFF, Panel Self-Refresh OFF"
+    }
 
-        # Extend TDR timeout to 30 seconds (prevents driver resets during heavy shader compile)
-        $tdrKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
-        New-ItemProperty $tdrKey "TdrDelay" 30 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        New-ItemProperty $tdrKey "TdrDdiDelay" 30 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        Write-Log "    GPU TDR timeout extended to 30s (shader compile protection)"
+    # Extend TDR timeout to 30 seconds (prevents driver resets during heavy shader compile)
+    $gfxKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+    Set-Reg $gfxKey "TdrDelay" 30
+    Set-Reg $gfxKey "TdrDdiDelay" 30
+    Write-Log "    GPU TDR timeout extended to 30s (shader compile protection)"
 
-        # DirectStorage: enable GPU decompression if available
-        $dsKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
-        New-ItemProperty $dsKey "DirectStorageForceDisable" 0 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        Write-Log "    DirectStorage / GPU decompression enabled"
-    } catch {}
-}
-
-function Restore-IntelGPU {
-    try {
-        $tdrKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
-        Remove-ItemProperty $tdrKey "TdrDelay" -ErrorAction SilentlyContinue
-        Remove-ItemProperty $tdrKey "TdrDdiDelay" -ErrorAction SilentlyContinue
-    } catch {}
-}
-
-function Disable-USBSelectiveSuspend {
-    try {
-        powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>&1 | Out-Null
-        powercfg /setactive SCHEME_CURRENT 2>&1 | Out-Null
-    } catch {}
+    # DirectStorage: enable GPU decompression if available
+    Set-Reg $gfxKey "DirectStorageForceDisable" 0
+    Write-Log "    DirectStorage / GPU decompression enabled"
 }
 
 # -- Shader Cache Management --------------------------------------------------
@@ -811,121 +786,14 @@ function Clear-TargetShaderCache {
 }
 
 function Optimize-ShaderOverrides {
-    try {
-        $dxKey = "HKLM:\SOFTWARE\Microsoft\DirectX"
-        if (-not (Test-Path $dxKey)) { New-Item $dxKey -Force | Out-Null }
-        # 0xFFFFFFFF = Unlimited shader cache limit (prevents stutter)
-        New-ItemProperty $dxKey "ShaderCacheLimitSize" 0xFFFFFFFF -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        
-        # Intel Arc specific shader optimizations
-        $intelKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000"
-        if (Test-Path $intelKey) {
-            New-ItemProperty $intelKey "DisableShaderCache" 0 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-            New-ItemProperty $intelKey "ShaderCache" 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        }
-    } catch {}
-}
+    # 0xFFFFFFFF = Unlimited shader cache limit (prevents stutter)
+    Set-Reg "HKLM:\SOFTWARE\Microsoft\DirectX" "ShaderCacheLimitSize" 0xFFFFFFFF
 
-function Restore-ShaderOverrides {
-    try {
-        $dxKey = "HKLM:\SOFTWARE\Microsoft\DirectX"
-        Remove-ItemProperty $dxKey "ShaderCacheLimitSize" -ErrorAction SilentlyContinue
-        
-        $intelKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000"
-        if (Test-Path $intelKey) {
-            Remove-ItemProperty $intelKey "DisableShaderCache" -ErrorAction SilentlyContinue
-            Remove-ItemProperty $intelKey "ShaderCache" -ErrorAction SilentlyContinue
-        }
-    } catch {}
-}
-
-# -- Network -----------------------------------------------------------------
-
-function Optimize-Network {
-    # Nagle and TCP Tuning
-    try {
-        $interfaces = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces" -ErrorAction SilentlyContinue
-        foreach ($iface in $interfaces) {
-            $ip = (Get-ItemProperty $iface.PSPath -ErrorAction SilentlyContinue).DhcpIPAddress
-            if ($ip -and $ip -ne "0.0.0.0") {
-                New-ItemProperty $iface.PSPath "TcpAckFrequency" 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-                New-ItemProperty $iface.PSPath "TCPNoDelay" 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-                New-ItemProperty $iface.PSPath "TcpDelAckTicks" 0 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-        }
-        netsh int tcp set global autotuninglevel=disabled 2>&1 | Out-Null
-        netsh int tcp set global rsc=disabled 2>&1 | Out-Null
-        netsh int tcp set global ecncapability=disabled 2>&1 | Out-Null
-        netsh int tcp set global timestamps=disabled 2>&1 | Out-Null
-        ipconfig /flushdns 2>&1 | Out-Null
-        Write-Log "    TCP: Nagle OFF, delayed ACK OFF, RSC OFF, ECN OFF"
-    } catch {}
-
-    # Wi-Fi 7 BE201 specific tuning
-    try {
-        $wifi = Get-NetAdapter -Name "Wi-Fi" -ErrorAction SilentlyContinue
-        if ($wifi) {
-            # Interrupt Moderation OFF (raw packet processing)
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "*InterruptModeration" -RegistryValue 0 -ErrorAction SilentlyContinue
-            # Packet Coalescing OFF (don't batch packets = lower latency)
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "*PacketCoalescing" -RegistryValue 0 -ErrorAction SilentlyContinue
-            # Throughput Booster ON
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "ThroughputBoosterEnabled" -RegistryValue 1 -ErrorAction SilentlyContinue
-            # Roaming Aggressiveness -> Lowest (don't roam mid-game)
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "RoamAggressiveness" -RegistryValue 1 -ErrorAction SilentlyContinue
-            # MIMO Power Save -> No SMPS (all antennas active)
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "MIMOPowerSaveMode" -RegistryValue 3 -ErrorAction SilentlyContinue
-            # Wake on Magic Packet OFF (prevent wake interference)
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "*WakeOnMagicPacket" -RegistryValue 0 -ErrorAction SilentlyContinue
-            Write-Log "    Wi-Fi 7 BE201: Interrupt Moderation OFF, Packet Coalescing OFF, Throughput Boost ON, Roaming Lowest"
-        }
-    } catch {}
-
-    # Wi-Fi Power Saving OFF
-    try {
-        powercfg /SETACVALUEINDEX SCHEME_CURRENT 19cbb8fa-5279-450e-9fac-8a3d5fedd0c1 12bbebe6-58d6-4636-95bb-3217ef867c1a 0 2>&1 | Out-Null
-        powercfg /SETACTIVE SCHEME_CURRENT 2>&1 | Out-Null
-    } catch {}
-}
-
-function Restore-Network {
-    try {
-        netsh int tcp set global autotuninglevel=normal 2>&1 | Out-Null
-        netsh int tcp set global rsc=enabled 2>&1 | Out-Null
-        netsh int tcp set global ecncapability=default 2>&1 | Out-Null
-        netsh int tcp set global timestamps=default 2>&1 | Out-Null
-        $wifi = Get-NetAdapter -Name "Wi-Fi" -ErrorAction SilentlyContinue
-        if ($wifi) {
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "*InterruptModeration" -RegistryValue 1 -ErrorAction SilentlyContinue
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "*PacketCoalescing" -RegistryValue 1 -ErrorAction SilentlyContinue
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "ThroughputBoosterEnabled" -RegistryValue 0 -ErrorAction SilentlyContinue
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "RoamAggressiveness" -RegistryValue 3 -ErrorAction SilentlyContinue
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "MIMOPowerSaveMode" -RegistryValue 1 -ErrorAction SilentlyContinue
-            Set-NetAdapterAdvancedProperty -Name $wifi.Name -RegistryKeyword "*WakeOnMagicPacket" -RegistryValue 1 -ErrorAction SilentlyContinue
-        }
-    } catch {}
-}
-
-function Optimize-DNS {
-    try {
-        $wifi = Get-NetAdapter -Name "Wi-Fi" -ErrorAction SilentlyContinue
-        if ($wifi) {
-            $currentDNS = (Get-DnsClientServerAddress -InterfaceIndex $wifi.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
-            Set-DnsClientServerAddress -InterfaceIndex $wifi.ifIndex -ServerAddresses ("1.1.1.1","1.0.0.1") -ErrorAction Stop
-            Write-Log "    DNS -> Cloudflare 1.1.1.1 / 1.0.0.1"
-            return $currentDNS
-        }
-    } catch {}
-    return $null
-}
-
-function Restore-DNS {
-    param([string[]]$OriginalDNS)
-    if ($OriginalDNS -and $OriginalDNS.Count -gt 0) {
-        try {
-            $wifi = Get-NetAdapter -Name "Wi-Fi" -ErrorAction SilentlyContinue
-            if ($wifi) { Set-DnsClientServerAddress -InterfaceIndex $wifi.ifIndex -ServerAddresses $OriginalDNS -ErrorAction Stop }
-        } catch {}
+    # Intel Arc specific shader optimizations
+    $intelKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000"
+    if (Test-Path $intelKey) {
+        Set-Reg $intelKey "DisableShaderCache" 0
+        Set-Reg $intelKey "ShaderCache" 1
     }
 }
 
@@ -987,18 +855,21 @@ function Get-CPUTemperature {
 
 # -- Main Loop ----------------------------------------------------------------
 
+# Leftover state means the last session was killed mid-game: undo it first
+if (Test-Path $StateFile) {
+    Write-Log "Leftover BoosterRestore.json found -- restoring settings from last session"
+    try { Restore-BoostState (Get-Content $StateFile -Raw | ConvertFrom-Json) } catch { Write-Log "    Could not read BoosterRestore.json" }
+}
+if ($RestoreOnly) { exit }
+
+$State            = New-BoostState
 $wasRunning       = $false
-$stoppedServices  = @()
-$disabledTasks    = @()
-$originalDNS      = $null
-$originalPower    = $null
 $boostCount       = 0
 $thermalWarned    = $false
 $lastAffinityCheck  = [DateTime]::MinValue
 $lastCompressTime   = [DateTime]::MinValue
 $lastRespawnScan    = [DateTime]::MinValue
 $lastThermalCheck   = [DateTime]::MinValue
-$memCompressionWasOn = $false
 $currentActivity  = "Monitoring system..."
 
 try {
@@ -1015,12 +886,14 @@ while ($true) {
 
         Set-BoosterIdlePriority
         Clear-TargetShaderCache
+        $script:State = New-BoostState
         Optimize-ShaderOverrides
-        $originalPower = Enable-UltimatePerformance
+        Enable-BestPerformanceMode
         Set-HighResTimer
 
         $res = Stop-Bloatware
-        $disabledTasks = Disable-RespawningSources
+        $State.Tasks = @(Disable-RespawningSources)
+        Save-BoostState
         Compress-WorkingSets
         Clear-StandbyMemory
 
@@ -1030,19 +903,19 @@ while ($true) {
 
         Reduce-InputLag
         Disable-FSOForTarget
-        Optimize-Bcdedit
         Set-DefenderExclusion
-        Disable-USBSelectiveSuspend
         Optimize-DWM
         Disable-MPO
 
-        $stoppedServices = Stop-GamingServices
+        $State.Services = @(Stop-GamingServices)
+        Save-BoostState
         Optimize-IntelGPU
         Force-HAGS
         Optimize-VisualEffects
 
         Set-TargetWorkingSetLock
-        $memCompressionWasOn = Disable-MemoryCompression
+        Disable-MemoryCompression
+        Save-BoostState
 
         $wasRunning = $true
         $thermalWarned = $false
@@ -1050,7 +923,7 @@ while ($true) {
         $lastRespawnScan = Get-Date
         $lastThermalCheck = Get-Date
         
-        $currentActivity = "Boost Active. KILLED: $($res.Killed) procs. TASKS: $($disabledTasks.Count)."
+        $currentActivity = "Boost Active. KILLED: $($res.Killed) procs. TASKS: $($State.Tasks.Count)."
     }
 
     # -- Active Polling (Every 3 seconds) -------------------------
@@ -1109,27 +982,7 @@ while ($true) {
         $currentActivity = "Game closed. Restoring system settings..."
         Update-Dashboard $false $currentActivity $freeRam $cpuTemp
 
-        Restore-TimerResolution
-        if ($stoppedServices.Count -gt 0) {
-            foreach ($s in $stoppedServices) { try { Start-Service $s -ErrorAction SilentlyContinue } catch {} }
-            $stoppedServices = @()
-        }
-        if ($disabledTasks.Count -gt 0) {
-            foreach ($t in $disabledTasks) { try { Enable-ScheduledTask -TaskName $t.Name -TaskPath $t.Path -ErrorAction SilentlyContinue | Out-Null } catch {} }
-            $disabledTasks = @()
-        }
-
-        Restore-VisualEffects
-        Restore-DWM
-        Restore-MPO
-        Restore-InputLag
-        Restore-Bcdedit
-        powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 1 2>&1 | Out-Null
-        powercfg /setactive SCHEME_CURRENT 2>&1 | Out-Null
-        Restore-IntelGPU
-        Restore-ShaderOverrides
-        if ($memCompressionWasOn) { Restore-MemoryCompression; $memCompressionWasOn = $false }
-        if ($originalPower) { Restore-PowerPlan $originalPower; $originalPower = $null }
+        Restore-BoostState $State
 
         $wasRunning = $false
         $currentActivity = "System fully restored. Monitoring..."
@@ -1142,26 +995,6 @@ while ($true) {
 }
 } finally {
     if ($wasRunning) {
-        Restore-TimerResolution
-        if ($stoppedServices.Count -gt 0) {
-            foreach ($s in $stoppedServices) { try { Start-Service $s -ErrorAction SilentlyContinue } catch {} }
-        }
-        if ($disabledTasks.Count -gt 0) {
-            foreach ($t in $disabledTasks) { try { Enable-ScheduledTask -TaskName $t.Name -TaskPath $t.Path -ErrorAction SilentlyContinue | Out-Null } catch {} }
-        }
-        Restore-VisualEffects
-        Restore-DWM
-        Restore-MPO
-        Restore-InputLag
-        Restore-Bcdedit
-        powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 1 2>&1 | Out-Null
-        powercfg /setactive SCHEME_CURRENT 2>&1 | Out-Null
-        Restore-IntelGPU
-        Restore-ShaderOverrides
-        if ($memCompressionWasOn) { Restore-MemoryCompression }
-        if ($originalPower) { Restore-PowerPlan $originalPower }
+        Restore-BoostState $State
     }
 }
-
-
-
